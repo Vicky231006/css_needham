@@ -29,16 +29,14 @@ def random10bit():
 
 #method that creates a random 10 bit number as a string to serve as our nonce
 def nonceGenerator():
-	num = ""
-	for i in range(10):
-		rand = random.randint(0,1)
-		num += str(rand)
-	return num
+    return format(random.randint(1, 1023), "010b")
 
 #method that performs the NS protocol
 def needhamSchroeder(soc):
     #receiving the package from step 2
-    message = soc.recv(1024).decode('utf8')
+    message = library.receiveMessage(soc)
+    if not message:
+        raise ConnectionError("KDC closed the connection before replying")
 
     #decrypting the message
     decrypedMessage = library.decrypt(message,KDC_key)
@@ -46,45 +44,49 @@ def needhamSchroeder(soc):
     IDb = decrypedMessage[10:18]
     T = decrypedMessage[18:28]
     smallEncryption = decrypedMessage[28:]
+    print("Received the KDC response and Bob's encrypted ticket")
     #now we connect to the harcoded channel client 2 is waiting for us to connect to
-    mySocket = socket.socket()
-    mySocket.connect((HOST,PORT))
-    #sending over step 3 to Bob
-    mySocket.send(smallEncryption.encode())
-    #receiving step 4 from Bob
-    newNonce = mySocket.recv(1024).decode()
-    #decrypting step 4
-    decryptedNonce = library.decrypt(newNonce,Ks)
-    #turning it into and int
-    changedNonce = int(decryptedNonce,2)
-    #subtracting 1: this si the F function that is predetermined by Alice and Bob
-    changedNonce = changedNonce - 1
-    #turning it back into a binary string
-    changedNonce = bin(changedNonce)[2:].zfill(10)
-    #encrypting f(nonce)
-    encryptedNonce = library.encrypt(changedNonce, Ks)
-    #sending step 5 to Bob
-    mySocket.send(encryptedNonce.encode())
-    
-    #if Bob received the anticipated differentiation in nonce value
-    #using the same encryption/decryption key..... 
-    #We now have a secure chat!
-    if mySocket.recv(1024).decode() == "VERIFIED":
+    with socket.socket() as mySocket:
+        mySocket.connect((HOST,PORT))
+        #sending over step 3 to Bob
+        print("Forwarding Bob's ticket")
+        library.sendMessage(mySocket, smallEncryption)
+        #receiving step 4 from Bob
+        newNonce = library.receiveMessage(mySocket)
+        if not newNonce:
+            raise ConnectionError("Bob closed the connection during authentication")
+        #decrypting step 4
+        decryptedNonce = library.decrypt(newNonce,Ks)
+        #turning it into and int
+        changedNonce = int(decryptedNonce,2) - 1
+        #turning it back into a binary string
+        changedNonce = bin(changedNonce)[2:].zfill(10)
+        #encrypting f(nonce)
+        encryptedNonce = library.encrypt(changedNonce, Ks)
+        #sending step 5 to Bob
+        library.sendMessage(mySocket, encryptedNonce)
+        
+        #if Bob received the anticipated differentiation in nonce value
+        #using the same encryption/decryption key..... 
+        #We now have a secure chat!
+        if library.receiveMessage(mySocket) != "VERIFIED":
+            raise ConnectionError("Bob did not verify the session key")
+        print("Bob verified the nonce challenge; secure chat established")
         while message != 'q':
 
             message = input("Enter the message you want to encrypt -> ")
             #encrypting the message using DES
             finalEncryptedMessage = library.encrypt(message,Ks)
 
-            #encrypting the message
-            #sending the message
-            mySocket.send(finalEncryptedMessage.encode())
+            library.sendMessage(mySocket, finalEncryptedMessage)
+            if message == 'q':
+                break
             #receiving the response from the other user
-            data = mySocket.recv(1024).decode()
-            #decrypting the other user's message
-            decryptedMessage = library.decrypt(data,Ks)
+            data = library.receiveMessage(mySocket)
             if not data:
                 break
+            #decrypting the other user's message
+            decryptedMessage = library.decrypt(data,Ks)
             print ("Decrypted Message = " + str(decryptedMessage))
 
 #method that runs that diffie helman exchange for the client
@@ -93,7 +95,7 @@ def diffieHelman(kdc, PrivateKey):
     
     #note b is the private key
     #receive public G and P from server
-    message = kdc.recv(1024).decode('utf8')
+    message = library.receiveMessage(kdc)
     message = message.split("|")
     # print(message)
     publicP, publicG = int(message[1]),int(message[2])
@@ -103,7 +105,7 @@ def diffieHelman(kdc, PrivateKey):
 
     #receives the first calculation
     #call this X
-    A = int(kdc.recv(1024).decode('utf8'))
+    A = int(library.receiveMessage(kdc))
 
     #generate 10 bit key for KDC
     #call this a
@@ -113,7 +115,7 @@ def diffieHelman(kdc, PrivateKey):
     B = (publicG**b)%publicP
 
     #now we send this to the server
-    kdc.send(str(B).encode())
+    library.sendMessage(kdc, str(B))
 
     #now we do the final calculation
     #S = A^b mod p
@@ -142,35 +144,34 @@ def main():
     while True:
         #print the user options
         printMenuOptions()
-        message = input(" -> ")
-        
-        
-        if 'connect' in message:
-            print("trying to connect")
-            otherUser = message.split("|")[1]
-            #this is for the server-side backend
-            message = 'connect|' + MyId + otherUser + nonceGenerator()
-            
-        soc.send(message.encode("utf8"))
-
-        if 'connect' in message:
-            #go up to the NS method and start the interaction
-            needhamSchroeder(soc)
+        message = input(" -> ").strip()
 
         if message == "quit":
+            library.sendMessage(soc, message)
             break
 
-        #showing the user available other users to connect to
         if message == "list":
-            soc.send(message.encode("utf8"))
-            userList = soc.recv(1024).decode('utf8')
+            library.sendMessage(soc, message)
+            userList = library.receiveMessage(soc)
             print(userList)
-        
-        if soc.recv(5120).decode("utf8") == "-":
-            pass   # null operation
-        
-            
-    soc.send(b'--quit--')
+            continue
+
+        if message.startswith("connect|"):
+            print("trying to connect")
+            otherUser = message.split("|", 1)[1]
+            if len(otherUser) != 8 or not otherUser.isdigit():
+                print("Enter a valid 8-digit user ID, for example connect|00000001")
+                continue
+            #this is for the server-side backend
+            message = 'connect|' + MyId + otherUser + nonceGenerator()
+            library.sendMessage(soc, message)
+            #go up to the NS method and start the interaction
+            needhamSchroeder(soc)
+            continue
+
+        print("Unknown command. Enter 'list', 'connect|id', or 'quit'.")
+
+    soc.close()
 
 if __name__ == "__main__":
     main()

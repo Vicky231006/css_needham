@@ -1,102 +1,127 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deterministic, presentation-only walkthrough; no sockets or encryption are used.
-DEMO_DELAY="${DEMO_DELAY:-0}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+DEMO_TIMEOUT="${DEMO_TIMEOUT:-30}"
+RUN_DIR=''
+KDC_PID=''
+BOB_PID=''
+ALICE_PID=''
+WATCHDOG_PID=''
 
-if [[ ! "$DEMO_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    printf 'DEMO_DELAY must be a non-negative number of seconds.\n' >&2
+if [[ ! "$DEMO_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'DEMO_TIMEOUT must be a positive integer number of seconds.\n' >&2
     exit 2
 fi
 
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-    BOLD=$'\033[1m'
-    DIM=$'\033[2m'
-    CYAN=$'\033[36m'
-    GREEN=$'\033[32m'
-    YELLOW=$'\033[33m'
-    RESET=$'\033[0m'
-else
-    BOLD=''
-    DIM=''
-    CYAN=''
-    GREEN=''
-    YELLOW=''
-    RESET=''
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    printf 'Python executable not found: %s (set PYTHON_BIN to its path).\n' "$PYTHON_BIN" >&2
+    exit 2
 fi
 
-pause() {
-    if [[ "$DEMO_DELAY" != "0" && "$DEMO_DELAY" != "0.0" ]]; then
-        sleep "$DEMO_DELAY"
+cleanup() {
+    for pid in "$ALICE_PID" "$BOB_PID" "$KDC_PID"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "$ALICE_PID" "$BOB_PID" "$KDC_PID"; do
+        if [[ -n "$pid" ]]; then
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    if [[ -n "$WATCHDOG_PID" ]]; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$RUN_DIR" ]]; then
+        rm -rf -- "$RUN_DIR"
     fi
 }
+trap cleanup EXIT
 
-heading() {
-    printf '\n%s%s%s\n' "$BOLD$CYAN" "$1" "$RESET"
-    printf '%s\n' '------------------------------------------------------------'
-    pause
+wait_for_output() {
+    local pid="$1"
+    local log_file="$2"
+    local expected="$3"
+    local attempt
+
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if grep -Fq -- "$expected" "$log_file"; then
+            return 0
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            printf 'A Python process exited before becoming ready:\n' >&2
+            cat "$log_file" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    printf 'Timed out waiting for "%s".\n' "$expected" >&2
+    cat "$log_file" >&2
+    return 1
 }
 
-log() {
-    printf '%s[%s]%s %s\n' "$DIM" "$1" "$RESET" "$2"
-    pause
+show_log() {
+    printf '\n===== %s: actual Python process output =====\n' "$1"
+    cat "$2"
 }
 
-message() {
-    printf '    %s-->%s %s\n' "$YELLOW" "$RESET" "$1"
-    pause
-}
+cd "$SCRIPT_DIR"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/needham-demo.XXXXXX")"
 
-printf '%sNeedham-Schroeder (symmetric-key) — end-to-end demo%s\n' "$BOLD" "$RESET"
-printf '%sDETERMINISTIC SIMULATION ONLY: no network traffic or real encryption.%s\n' "$DIM" "$RESET"
-printf 'Actors: Alice (A), Bob (B), and the Key Distribution Center (KDC)\n'
-pause
+printf 'Needham-Schroeder end-to-end demo\n'
+printf 'Running server.py, clientB.py, and client.py with real sockets and the project encryption code.\n'
+printf 'The demo supplies scripted menu/chat input so it can run unattended.\n'
 
-heading '0. Start the KDC and connect both clients'
-log KDC 'Listening at 127.0.0.1:5000'
-log Bob 'Connected to KDC; assigned ID 00000001'
-log Alice 'Connected to KDC; assigned ID 00000002'
-log Bob 'Waiting for Alice on the peer channel (127.0.0.1:5010)'
+"$PYTHON_BIN" -u server.py >"$RUN_DIR/kdc.log" 2>&1 &
+KDC_PID=$!
+wait_for_output "$KDC_PID" "$RUN_DIR/kdc.log" 'Socket now listening...'
 
-heading '1. Establish each client-to-KDC key with Diffie-Hellman'
-log KDC 'Public parameters: p = 23, g = 5'
-log Alice 'KDC public value = 8; Alice public value = 17'
-log Alice 'Shared KDC key K_A = 12 (binary 0000001100)'
-log Bob 'KDC public value = 4; Bob public value = 11'
-log Bob 'Shared KDC key K_B = 13 (binary 0000001101)'
-log KDC 'Derived the same per-client keys; values are exposed here for teaching'
+printf 'wait\nHi Alice!\nquit\n' | "$PYTHON_BIN" -u clientB.py >"$RUN_DIR/bob.log" 2>&1 &
+BOB_PID=$!
+wait_for_output "$BOB_PID" "$RUN_DIR/bob.log" 'Waiting for connection.....'
 
-heading '2. Alice asks the KDC for a session with Bob'
-log Alice 'Wants to talk to Bob (ID 00000001); chooses nonce N1 = 0011010110'
-message 'Alice -> KDC: ID_A || ID_B || N1'
-log KDC 'Request received: 00000002 || 00000001 || 0011010110'
+printf 'connect|00000001\nHello Bob!\nq\nquit\n' | "$PYTHON_BIN" -u client.py >"$RUN_DIR/alice.log" 2>&1 &
+ALICE_PID=$!
 
-heading '3. KDC creates a session key and Bob ticket'
-log KDC 'Creates session key K_S = 1011001101 and freshness value T = 0110100101'
-log KDC 'Bob ticket = E_KB[K_S || ID_A || T]'
-log KDC 'Response for Alice = E_KA[K_S || ID_B || T || Bob ticket]'
-message 'KDC -> Alice: E_KA[K_S || ID_B || T || E_KB[K_S || ID_A || T]]'
-log Alice 'Decrypts the response with K_A; learns K_S and receives Bob ticket'
+(
+    sleep "$DEMO_TIMEOUT"
+    if kill -0 "$ALICE_PID" 2>/dev/null; then
+        printf 'Timed out after %s seconds while waiting for the clients to finish.\n' \
+            "$DEMO_TIMEOUT" >"$RUN_DIR/timeout"
+        kill "$ALICE_PID" 2>/dev/null || true
+    fi
+) &
+WATCHDOG_PID=$!
 
-heading '4. Alice forwards Bob’s ticket'
-message 'Alice -> Bob: E_KB[K_S || ID_A || T]'
-log Bob 'Decrypts ticket with K_B; learns K_S and Alice ID 00000002'
+if wait "$ALICE_PID"; then
+    ALICE_PID=''
+else
+    status=$?
+    if [[ -f "$RUN_DIR/timeout" ]]; then
+        cat "$RUN_DIR/timeout" >&2
+    fi
+    show_log Alice "$RUN_DIR/alice.log" >&2
+    show_log Bob "$RUN_DIR/bob.log" >&2
+    exit "$status"
+fi
 
-heading '5. Bob proves possession of the session key'
-log Bob 'Chooses challenge nonce N_B = 1110001010'
-message 'Bob -> Alice: E_KS[N_B]'
-log Alice 'Decrypts challenge and computes N_B - 1 = 1110001001'
-message 'Alice -> Bob: E_KS[N_B - 1]'
-log Bob 'Decrypts response; expected value received'
-printf '\n%s%sSUCCESS:%s Alice and Bob are authenticated and share K_S.\n' "$BOLD" "$GREEN" "$RESET"
+kill "$WATCHDOG_PID" 2>/dev/null || true
+wait "$WATCHDOG_PID" 2>/dev/null || true
+WATCHDOG_PID=''
 
-heading '6. Example secure-chat exchange'
-log Alice 'Types: Hello Bob!'
-message 'Alice -> Bob: E_KS["Hello Bob!"]'
-log Bob 'Decrypts with K_S: Hello Bob!'
-log Bob 'Types: Hi Alice!'
-message 'Bob -> Alice: E_KS["Hi Alice!"]'
-log Alice 'Decrypts with K_S: Hi Alice!'
+if wait "$BOB_PID"; then
+    BOB_PID=''
+else
+    status=$?
+    show_log Bob "$RUN_DIR/bob.log" >&2
+    exit "$status"
+fi
 
-printf '\n%s%sDemo complete.%s Ciphertexts above are protocol notation, not computed DES output.\n' "$BOLD" "$GREEN" "$RESET"
-printf 'Run with DEMO_DELAY=0.25 bash demo.sh to animate the transcript.\n'
+show_log KDC "$RUN_DIR/kdc.log"
+show_log Bob "$RUN_DIR/bob.log"
+show_log Alice "$RUN_DIR/alice.log"
+printf '\nDemo finished: all three Python processes ran and exited successfully.\n'

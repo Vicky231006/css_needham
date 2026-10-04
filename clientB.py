@@ -30,12 +30,7 @@ def random10bit():
 
 #method that creates a random 10 bit number as a string to serve as our nonce
 def nonceGenerator():
-	num = ""
-	for i in range(10):
-		rand = random.randint(0,1)
-		num += str(rand)
-	return num
-
+    return format(random.randint(1, 1023), "010b")
 
 #method that runs that diffie helman exchange for the client
 def diffieHelman(kdc, PrivateKey):
@@ -43,7 +38,7 @@ def diffieHelman(kdc, PrivateKey):
     
     #note b is the private key
     #receive public G and P from server
-    message = kdc.recv(1024).decode('utf8')
+    message = library.receiveMessage(kdc)
     message = message.split("|")
     publicP, publicG = int(message[1]),int(message[2])
     global MyId
@@ -51,7 +46,7 @@ def diffieHelman(kdc, PrivateKey):
 
     #receives the first calculation
     #call this X
-    A = int(kdc.recv(1024).decode('utf8'))
+    A = int(library.receiveMessage(kdc))
 
     #generate 10 bit key for KDC
     #call this a
@@ -61,7 +56,7 @@ def diffieHelman(kdc, PrivateKey):
     B = (publicG**b)%publicP
 
     #now we send this to the server
-    kdc.send(str(B).encode())
+    library.sendMessage(kdc, str(B))
 
     #now we do the final calculation
     #S = A^b mod p
@@ -93,66 +88,73 @@ def main():
     while True:
         printMenuOptions()
 
-        message = input(" -> ")
+        message = input(" -> ").strip()
         if message == "quit":
+            library.sendMessage(soc, message)
             break
-        #print the user options
-        soc.send(message.encode("utf8"))
-        if soc.recv(5120).decode("utf8") == "-":
-            pass   # null operation
 
-        
-        if message == "list":
-            soc.send(message.encode("utf8"))
-            userList = soc.recv(1024).decode('utf8')
-            print(userList)
-        if 'wait' in message:
-            mySocket = socket.socket()
-            mySocket.bind((HOST,PORT))
+        if message == "wait":
+            library.sendMessage(soc, message)
+            if library.receiveMessage(soc) != "-":
+                raise ConnectionError("KDC did not acknowledge Bob's wait request")
+            with socket.socket() as mySocket:
+                mySocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                mySocket.bind((HOST,PORT))
 
-            print("Waiting for connection.....")
-            #listens for a user to connect
-            mySocket.listen(1)
-            #getting the user's connection info
-            conn, addr = mySocket.accept()
-            print ("Connection from: " + str(addr))
+                print("Waiting for connection.....")
+                #listens for a user to connect
+                mySocket.listen(1)
+                #getting the user's connection info
+                conn, addr = mySocket.accept()
+                with conn:
+                    print ("Connection from: " + str(addr))
 
-            #this means that Alice has initiated NS with the KDC and has now
-            #sent us an encrypted envelope with a session key
-            package = conn.recv(1024).decode()
+                    #this means that Alice has initiated NS with the KDC and has now
+                    #sent us an encrypted envelope with a session key
+                    package = library.receiveMessage(conn)
+                    if not package:
+                        raise ConnectionError("Alice closed the connection before sending Bob's ticket")
 
-            #we decrypte it
-            decryptedPackage = library.decrypt(package,KDC_key)
-            Ks = decryptedPackage[:10]
-            IDa = decryptedPackage[10:18]
-            nonce = decryptedPackage[18:]
-            #now we send back an an encrypted nonce
-            newNonce = nonceGenerator()
-            encryptedNonce = library.encrypt(newNonce,Ks)
-            conn.send(encryptedNonce.encode())
+                    #we decrypte it
+                    decryptedPackage = library.decrypt(package,KDC_key)
+                    Ks = decryptedPackage[:10]
+                    IDa = decryptedPackage[10:18]
+                    nonce = decryptedPackage[18:]
+                    print("Received and decrypted Alice's ticket from the KDC")
+                    #now we send back an an encrypted nonce
+                    newNonce = nonceGenerator()
+                    encryptedNonce = library.encrypt(newNonce,Ks)
+                    library.sendMessage(conn, encryptedNonce)
+                    print("Sent encrypted nonce challenge to Alice")
 
-            # we get an encrypted altered nonce from A
-            incomingChangedNonce = conn.recv(1024).decode()
-            changedIncomingNonce = library.decrypt(incomingChangedNonce,Ks)
+                    # we get an encrypted altered nonce from A
+                    incomingChangedNonce = library.receiveMessage(conn)
+                    if not incomingChangedNonce:
+                        raise ConnectionError("Alice closed the connection during authentication")
+                    changedIncomingNonce = library.decrypt(incomingChangedNonce,Ks)
 
-            #if the difference is what we expect (pre-determined), then....
-            #we now have a secure encrypted communication!
-            if int(changedIncomingNonce,2) == int(newNonce,2) - 1:
-                conn.send("VERIFIED".encode())
-                while True:
-                    data = conn.recv(1024).decode()
-                    decryptedMessage = library.decrypt(data,Ks)
-                    if not data:
-                            break
-                    print ("Decrypted Message = " + str(decryptedMessage))
-                    message = input("Enter the message you want to encrypt -> ")
-                    #encrypting the message using DES
-                    finalEncryptedMessage = library.encrypt(message,Ks)
-                    #prints the pretty loading bar
-                    #sending the message
-                    conn.send(finalEncryptedMessage.encode())
+                    #if the difference is what we expect (pre-determined), then....
+                    #we now have a secure encrypted communication!
+                    if int(changedIncomingNonce,2) == int(newNonce,2) - 1:
+                        library.sendMessage(conn, "VERIFIED")
+                        print("Alice passed nonce verification; secure chat established")
+                        while True:
+                            data = library.receiveMessage(conn)
+                            if not data:
+                                break
+                            decryptedMessage = library.decrypt(data,Ks)
+                            if decryptedMessage == "q":
+                                print("Alice ended the secure chat")
+                                break
+                            print ("Decrypted Message = " + str(decryptedMessage))
+                            message = input("Enter the message you want to encrypt -> ")
+                            #encrypting the message using DES
+                            finalEncryptedMessage = library.encrypt(message,Ks)
+                            library.sendMessage(conn, finalEncryptedMessage)
+                    else:
+                        library.sendMessage(conn, "REJECTED")
 
-    soc.send(b'--quit--')
+    soc.close()
 
 if __name__ == "__main__":
     main()

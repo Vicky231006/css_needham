@@ -2,6 +2,21 @@ import des
 from time import sleep
 import sys 
 
+def sendMessage(connection, message):
+    connection.sendall((message + "\n").encode("utf8"))
+
+def receiveMessage(connection):
+    message = bytearray()
+    while True:
+        character = connection.recv(1)
+        if not character:
+            if not message:
+                return ""
+            raise ConnectionError("Connection closed before a complete message arrived")
+        if character == b"\n":
+            return message.decode("utf8")
+        message.extend(character)
+
 #function that convers binary to ascii
 def text_from_bits(bits, encoding='utf-8', errors='surrogatepass'):
     n = int(bits, 2)

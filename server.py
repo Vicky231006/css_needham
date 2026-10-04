@@ -19,11 +19,7 @@ def random10bit():
 
 #method that creates a random 10 bit number as a string to serve as our nonce
 def nonceGenerator():
-	num = ""
-	for i in range(10):
-		rand = random.randint(0,1)
-		num += str(rand)
-	return num
+    return format(random.randint(1, 1023), "010b")
 
 def main():
     start_server()
@@ -42,13 +38,9 @@ def needhamSchroeder(package, packageConnection):
     #receinving the contents from step 1
     #package is IDA||IDB||N1
     IDa = package[:8]
-    IDaAsInt = int(IDa)
-    IDaAsBinary = bin(IDaAsInt)[2:].zfill(8)
-    
     IDb = package[8:16]
-    IDbAsInt = int(IDa)
-    IDbAsBinary = bin(IDaAsInt)[2:].zfill(8)
     nonce = package[16:]
+    print("Needham-Schroeder request: Alice {} -> Bob {}".format(IDa, IDb))
 
     AsKey = userKeys[IDa]
     BsKey = userKeys[IDb]
@@ -56,13 +48,14 @@ def needhamSchroeder(package, packageConnection):
     Ks = nonceGenerator()
     T = nonceGenerator()
     #creating the smaller envelope
-    messageToBeEncrypted = Ks + IDaAsBinary + T
+    messageToBeEncrypted = Ks + IDa + T
     encryptedMessage = library.encrypt(messageToBeEncrypted,BsKey)
 
     #creating the bigger envelop
-    nextMessage = Ks + IDbAsBinary + T + encryptedMessage
+    nextMessage = Ks + IDb + T + encryptedMessage
     finalEncryptedMessage = library.encrypt(nextMessage,AsKey)
 
+    print("Created session key and encrypted ticket for Bob")
     return finalEncryptedMessage
 
 #method for initiating DH with each connected user
@@ -76,7 +69,7 @@ def diffieHelman(client):
     # client.send(user.encode())
     #send the public P and public G to the client
     message = "{}|{}|{}".format(user,PublicP,PublicG)
-    client.send(message.encode())
+    library.sendMessage(client, message)
 
     # print("here")
     
@@ -88,10 +81,10 @@ def diffieHelman(client):
     #A = g^a mod p
     #send that to the client
     A = (PublicG**a)%PublicP
-    client.send(str(A).encode())
+    library.sendMessage(client, str(A))
 
     #receives the client calculation
-    B = int(client.recv(1024).decode('utf8'))
+    B = int(library.receiveMessage(client))
     #do final calculation to get shared key
     #S = B^a mod p
     S = (B**a)%PublicP
@@ -155,7 +148,7 @@ def client_thread(connection, ip, port, max_buffer_size = 5120):
             print(connection.getpeername())
             if len(connections)==1:
                 output = "You are the only user"
-                connection.send(output.encode())
+                library.sendMessage(connection, output)
             else:
                 for user in connections:
                     if connections[connection.getpeername()] == None:
@@ -167,29 +160,28 @@ def client_thread(connection, ip, port, max_buffer_size = 5120):
                         output += str(connections[user]) + ": "
                         output += "YOU \n"
                 print("output: ",output)
-                connection.send(output.encode())
+                library.sendMessage(connection, output)
         elif 'connect' in client_input:
             #we need to get the part after "connect|...."
             package = client_input.split("|")[1]
             #find the message you want to send to A
             messageToA = needhamSchroeder(package,connection)
             #send to A and now the KDC's job is done
-            connection.send(messageToA.encode())
+            library.sendMessage(connection, messageToA)
 
         else:
             print("User " + str(user) + " sent: {}".format(client_input))
-            connection.sendall("-".encode("utf8"))
+            library.sendMessage(connection, "-")
 
 #wrapper for making sure incoming input is good
 def receive_input(connection, max_buffer_size):
-    client_input = connection.recv(max_buffer_size)
+    client_input = library.receiveMessage(connection)
     client_input_size = sys.getsizeof(client_input)
 
     if client_input_size > max_buffer_size:
         print("The input size is greater than expected {}".format(client_input_size))
 
-    decoded_input = client_input.decode("utf8").rstrip()  # decode and strip end of line
-    return decoded_input
+    return client_input.rstrip()
 
 
 if __name__ == "__main__":

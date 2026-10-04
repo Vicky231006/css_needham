@@ -14,16 +14,21 @@ This code was written in Python 3. There are 3 Python files in this repository:
 
 First you must cd into the Needham-Schroeder folder
 
-To show a deterministic end-to-end transcript of the protocol without starting
-the network clients, run the Bash simulation:
+To run an unattended end-to-end demonstration using the actual Python KDC and
+clients, with real local sockets and the project encryption code, run:
 
 ```bash
 bash demo.sh
 ```
 
-Set `DEMO_DELAY` to a number of seconds to animate the output, for example
-`DEMO_DELAY=0.25 bash demo.sh`. This is a presentation-only simulation: it
-does not open sockets, perform Diffie-Hellman calculations, or encrypt messages.
+The script starts `server.py`, starts Bob (`clientB.py`) in wait mode, then
+starts Alice (`client.py`) to connect to Bob and exchange sample chat messages.
+It captures and displays the output from each real process, supplies the menu
+and chat input automatically, and stops the KDC when the demo is complete.
+Python must be available as `python`; set `PYTHON_BIN` if it has a different
+name or path. Set `DEMO_TIMEOUT` to change the client timeout (default: 30
+seconds). The implementation uses small teaching parameters and its DES
+variant is not suitable for real security.
 
 To run the code, first run the server.py file. This file serves as our KDC
 
